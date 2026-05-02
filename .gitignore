@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.venv/
+.tmp/
+models/
+*.log
+*.partial.vtt
+*.partial.txt
+.DS_Store
+Thumbs.db
