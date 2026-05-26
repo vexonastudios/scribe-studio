@@ -23,13 +23,20 @@ export function normalizeTimestamp(timestamp: string) {
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${fraction}`;
 }
 
-export function convertSbvToVtt(input: string) {
+export type ConvertSbvOptions = {
+  /** When true, skip malformed cues instead of throwing. Useful for batch processing. */
+  lenient?: boolean;
+};
+
+export function convertSbvToVtt(input: string, options?: ConvertSbvOptions) {
+  const lenient = options?.lenient ?? false;
   const normalized = normalizeLineEndings(input.replace(/^\uFEFF/, ""));
   const blocks = normalized
     .split(/\n{2,}/)
     .map((block) => block.trimEnd())
     .filter((block) => block.trim().length > 0);
   const cues: string[] = [];
+  const skipped: number[] = [];
 
   blocks.forEach((block, index) => {
     const lines = block.split("\n");
@@ -37,21 +44,40 @@ export function convertSbvToVtt(input: string) {
     const match = timingLine.match(timingLinePattern);
 
     if (!match) {
-      throw new Error(`Cue ${index + 1} is missing a valid SBV timing line.`);
+      if (lenient) {
+        skipped.push(index + 1);
+        return;
+      }
+
+      const lineNumber = normalized.substring(0, normalized.indexOf(block)).split("\n").length;
+      throw new Error(`Cue ${index + 1} (line ${lineNumber}) is missing a valid SBV timing line: "${timingLine.trim()}"`);
     }
 
-    const textLines = lines.slice(1);
-    const start = normalizeTimestamp(match[1]);
-    const end = normalizeTimestamp(match[2]);
-    cues.push([`${start} --> ${end}`, ...textLines].join("\n"));
+    try {
+      const textLines = lines.slice(1);
+      const start = normalizeTimestamp(match[1]);
+      const end = normalizeTimestamp(match[2]);
+      cues.push([`${start} --> ${end}`, ...textLines].join("\n"));
+    } catch (error) {
+      if (lenient) {
+        skipped.push(index + 1);
+        return;
+      }
+
+      const lineNumber = normalized.substring(0, normalized.indexOf(block)).split("\n").length;
+      throw new Error(`Cue ${index + 1} (line ${lineNumber}): ${error instanceof Error ? error.message : "Parse error"}`);
+    }
   });
 
   if (cues.length === 0) {
-    throw new Error("No SBV cues were found.");
+    throw new Error(skipped.length > 0
+      ? `No valid SBV cues found. ${skipped.length} cue${skipped.length === 1 ? " was" : "s were"} skipped due to errors.`
+      : "No SBV cues were found.");
   }
 
   return {
     cueCount: cues.length,
+    skippedCount: skipped.length,
     vtt: `WEBVTT\n\n${cues.join("\n\n")}\n`
   };
 }
