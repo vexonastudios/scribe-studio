@@ -20,6 +20,12 @@ import type {
 
 let mainWindow: BrowserWindow | null = null;
 
+// ── Fix userData path before app is ready ─────────────────────────────────────
+// Electron derives userData from package.json "name" ("scribe-studio"), giving
+// %APPDATA%\scribe-studio — but setup-engine.ps1 writes the .venv to
+// %APPDATA%\Scribe Studio. Override here so both sides agree on the same path.
+app.setPath("userData", path.join(app.getPath("appData"), "Scribe Studio"));
+
 // Last known VRAM from GPU probe — used to pick optimal batch size
 let lastKnownVramGb: number | null = null;
 
