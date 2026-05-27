@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, MenuItem, net, protocol, shell } from "electron";
 import { autoUpdater } from "electron-updater";
 import { ChildProcess, spawn } from "node:child_process";
 import fs from "node:fs";
@@ -140,8 +140,10 @@ function createWindow() {
     });
 
     autoUpdater.on("error", (err) => {
-      // Silent — update errors should not crash the app
       console.error("[auto-updater]", err.message);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("update:error", err.message);
+      }
     });
 
     // Check immediately, then every 4 hours
@@ -1015,6 +1017,74 @@ ipcMain.handle("engine:setup", async () => {
 
 ipcMain.handle("update:install", () => autoUpdater.quitAndInstall());
 
+ipcMain.handle("update:check", async () => {
+  if (!app.isPackaged) {
+    return { message: "Auto-update only works in the packaged app." };
+  }
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    if (!result) return { message: "Already on the latest version." };
+    return { message: `Checking for updates… current: ${app.getVersion()}` };
+  } catch (err) {
+    return { message: `Update check failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
+});
+
+// ── Native application menu ───────────────────────────────────────────────────
+
+function buildMenu() {
+  const isMac = process.platform === "darwin";
+  const version = app.getVersion();
+
+  const template: (Electron.MenuItemConstructorOptions | MenuItem)[] = [
+    ...(isMac ? [{ role: "appMenu" as const }] : []),
+    { role: "fileMenu" as const },
+    { role: "editMenu" as const },
+    {
+      label: "Help",
+      submenu: [
+        {
+          label: `Scribe Studio v${version}`,
+          enabled: false,
+        },
+        { type: "separator" as const },
+        {
+          label: "Check for Updates…",
+          click: async () => {
+            if (!app.isPackaged) {
+              dialog.showMessageBox({ message: "Auto-update only works in the packaged app.", type: "info" });
+              return;
+            }
+            try {
+              const result = await autoUpdater.checkForUpdates();
+              if (!result) {
+                dialog.showMessageBox({
+                  type: "info",
+                  title: "No Updates",
+                  message: `Scribe Studio v${version} is the latest version.`,
+                });
+              }
+            } catch (err) {
+              dialog.showErrorBox(
+                "Update Check Failed",
+                err instanceof Error ? err.message : String(err)
+              );
+            }
+          },
+        },
+        { type: "separator" as const },
+        {
+          label: "Open App Data Folder",
+          click: () => shell.openPath(userDataRoot()),
+        },
+      ],
+    },
+  ];
+
+  const menu = Menu.buildFromTemplate(template);
+  Menu.setApplicationMenu(menu);
+}
+
 // Register app:// scheme BEFORE app is ready (Electron requirement)
 // This lets the packaged renderer load its assets via a stable custom protocol
 // instead of file://, which doesn't resolve asar sub-resources reliably.
@@ -1043,6 +1113,7 @@ app.whenReady().then(() => {
   }
 
   createWindow();
+  buildMenu();
 });
 
 app.on("window-all-closed", () => {
