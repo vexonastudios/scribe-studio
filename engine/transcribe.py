@@ -13,6 +13,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
 
+# Suppress HuggingFace Hub authentication nag and tokenizer parallelism warning.
+# faster-whisper downloads models from the Hub; without a token it prints a
+# rate-limit notice on every run. Setting verbosity to 'error' silences it.
+os.environ.setdefault("HF_HUB_VERBOSITY", "error")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 
 @dataclass
 class Cue:

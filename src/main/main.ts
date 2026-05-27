@@ -719,7 +719,12 @@ async function runTranscription(request: TranscribeRequest): Promise<void> {
   try {
     await new Promise<void>((resolve) => {
       const proc = spawn(pythonExe, args, {
-        env: { ...process.env, PYTHONUNBUFFERED: "1" },
+        env: {
+          ...process.env,
+          PYTHONUNBUFFERED: "1",
+          HF_HUB_VERBOSITY: "error",          // suppress HF Hub auth nag
+          TOKENIZERS_PARALLELISM: "false",    // suppress tokenizer fork warning
+        },
         stdio: ["ignore", "pipe", "pipe"]
       });
 
@@ -746,8 +751,14 @@ async function runTranscription(request: TranscribeRequest): Promise<void> {
 
       proc.stderr?.on("data", (chunk: Buffer) => {
         const text = chunk.toString("utf8").trim();
-        // Filter out normal faster-whisper/PyTorch noise
-        if (text && !text.includes("UserWarning") && !text.includes("FutureWarning")) {
+        // Filter out known noisy-but-harmless stderr output
+        if (text &&
+            !text.includes("UserWarning") &&
+            !text.includes("FutureWarning") &&
+            !text.includes("unauthenticated") &&
+            !text.includes("hf_token") &&
+            !text.includes("huggingface.co") &&
+            !text.includes("rate limit")) {
           sendTranscribeEvent({ type: "log", message: `[stderr] ${text}` });
         }
       });
