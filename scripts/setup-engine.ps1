@@ -1,11 +1,11 @@
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-# ── Resolve paths ──────────────────────────────────────────────────────────────
+# -- Resolve paths ---------------------------------------------------------------
 # When installed: $PSScriptRoot = <install>\resources\scripts\
-#   Split-Path -Parent → <install>\resources\  (engine\ lives here)
+#   Split-Path -Parent -> <install>\resources\  (engine\ lives here)
 # When in dev:    $PSScriptRoot = <project>\scripts\
-#   Split-Path -Parent → <project>\           (engine\ lives here too)
+#   Split-Path -Parent -> <project>\           (engine\ lives here too)
 
 $ResourcesDir     = Split-Path -Parent $PSScriptRoot
 $RequirementsFile = Join-Path $ResourcesDir "engine\requirements.txt"
@@ -29,7 +29,7 @@ if (!(Test-Path $RequirementsFile)) {
     throw "requirements.txt not found at: $RequirementsFile`nPlease reinstall the app."
 }
 
-# ── Helper: run a command and throw if it fails ────────────────────────────────
+# -- Helper: run a command and throw if it fails ---------------------------------
 function Invoke-Checked {
     param([string]$Label, [scriptblock]$Command)
     Write-Host $Label
@@ -39,14 +39,14 @@ function Invoke-Checked {
     }
 }
 
-# ── Helper: refresh PATH from registry ────────────────────────────────────────
+# -- Helper: refresh PATH from registry ------------------------------------------
 function Update-Path {
     $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
     $userPath    = [System.Environment]::GetEnvironmentVariable("Path", "User")
     $env:Path    = @($machinePath, $userPath) -join ";"
 }
 
-# ── Helper: find Python 3 on current PATH ─────────────────────────────────────
+# -- Helper: find Python 3 on current PATH ----------------------------------------
 function Find-Python {
     foreach ($candidate in @("py", "python3", "python")) {
         try {
@@ -60,7 +60,7 @@ function Find-Python {
     return $null
 }
 
-# ── Step 1: Ensure Python 3 is available ──────────────────────────────────────
+# -- Step 1: Ensure Python 3 is available ----------------------------------------
 $SystemPython = Find-Python
 
 if (-not $SystemPython) {
@@ -129,27 +129,27 @@ Please install Python 3.10+ manually:
     }
 }
 
-# ── Step 2: Create venv if needed ─────────────────────────────────────────────
+# -- Step 2: Create venv if needed -----------------------------------------------
 if (!(Test-Path $Venv)) {
     Invoke-Checked "Creating Python virtual environment..." { & $SystemPython -m venv $Venv }
 } else {
-    Write-Host "Existing venv found at $Venv — updating packages..."
+    Write-Host "Existing venv found at $Venv -- updating packages..."
 }
 
 $VenvPython = Join-Path $Venv "Scripts\python.exe"
 
-# ── Step 3: Install packages ───────────────────────────────────────────────────
+# -- Step 3: Install packages ----------------------------------------------------
 Invoke-Checked "Bootstrapping pip..."     { & $VenvPython -m ensurepip --upgrade --default-pip }
 Invoke-Checked "Upgrading pip..."         { & $VenvPython -m pip install --upgrade pip }
 
-Write-Host "Installing transcription engine (downloading ~3-4 GB — please wait, this takes several minutes)..."
+Write-Host "Installing transcription engine (downloading ~3-4 GB -- please wait, this takes several minutes)..."
 & $VenvPython -m pip install -r $RequirementsFile `
     --extra-index-url https://download.pytorch.org/whl/cu128
 if ($LASTEXITCODE -ne 0) {
     throw "Package installation failed with exit code $LASTEXITCODE"
 }
 
-# ── Step 4: Verify CUDA ────────────────────────────────────────────────────────
+# -- Step 4: Verify CUDA ---------------------------------------------------------
 Write-Host ""
 Write-Host "Verifying GPU / CUDA availability..."
 try {
@@ -158,7 +158,7 @@ try {
     Write-Host "  PyTorch $ptVer"
     if ($cudaOk -eq "True") {
         $gpuName = & $VenvPython -c "import torch; print(torch.cuda.get_device_name(0))" 2>&1
-        $vramGb  = & $VenvPython -c "import torch; print(round(torch.cuda.get_device_properties(0).total_mem/1024**3,1))" 2>&1
+        $vramGb  = & $VenvPython -c "import torch; print(round(torch.cuda.get_device_properties(0).total_memory/1024**3,1))" 2>&1
         Write-Host "  GPU: $gpuName ($vramGb GB VRAM)"
     } else {
         Write-Host "  No NVIDIA GPU detected - CPU mode will be used (slower but fully functional)"
