@@ -153,21 +153,18 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host ""
 Write-Host "Verifying GPU / CUDA availability..."
 try {
-    # Use single-quoted here-string (@'...'@) so PowerShell does NOT interpolate
-    # anything — Python's f-strings and curly braces pass through unchanged.
-    & $VenvPython -c @'
-import torch
-print("PyTorch " + torch.__version__)
-print("CUDA available: " + str(torch.cuda.is_available()))
-if torch.cuda.is_available():
-    name = torch.cuda.get_device_name(0)
-    vram = round(torch.cuda.get_device_properties(0).total_mem / 1024**3, 1)
-    print("GPU: " + name + " (" + str(vram) + " GB VRAM)")
-else:
-    print("No NVIDIA GPU detected - will use CPU (slower but fully functional)")
-'@
+    $ptVer  = & $VenvPython -c "import torch; print(torch.__version__)" 2>&1
+    $cudaOk = & $VenvPython -c "import torch; print(torch.cuda.is_available())" 2>&1
+    Write-Host "  PyTorch $ptVer"
+    if ($cudaOk -eq "True") {
+        $gpuName = & $VenvPython -c "import torch; print(torch.cuda.get_device_name(0))" 2>&1
+        $vramGb  = & $VenvPython -c "import torch; print(round(torch.cuda.get_device_properties(0).total_mem/1024**3,1))" 2>&1
+        Write-Host "  GPU: $gpuName ($vramGb GB VRAM)"
+    } else {
+        Write-Host "  No NVIDIA GPU detected - CPU mode will be used (slower but fully functional)"
+    }
 } catch {
-    Write-Host "  Could not verify CUDA — CPU-only mode will be used."
+    Write-Host "  Could not verify CUDA - CPU mode will be used."
 }
 
 Write-Host ""
