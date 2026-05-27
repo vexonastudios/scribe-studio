@@ -1,5 +1,6 @@
 node_modules/
 dist/
+release/
 .venv/
 .tmp/
 models/
@@ -9,3 +10,4 @@ models/
 .DS_Store
 Thumbs.db
 __pycache__/
+scripts/make-ico.py

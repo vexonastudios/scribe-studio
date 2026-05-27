@@ -1,11 +1,17 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } from "electron";
+import { autoUpdater } from "electron-updater";
+import { ChildProcess, spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { convertSbvToVtt } from "../shared/sbv";
 import type {
+  AudioFile,
   CaptionFile,
   ConversionRequest,
   ConversionResult,
+  GpuInfo,
+  TranscribeEvent,
+  TranscribeRequest,
   YouTubeCaptionConversionRequest,
   YouTubeCaptionConversionResult,
   YouTubeCaptionTrack,
@@ -14,25 +20,72 @@ import type {
 
 let mainWindow: BrowserWindow | null = null;
 
+// Last known VRAM from GPU probe — used to pick optimal batch size
+let lastKnownVramGb: number | null = null;
+
 const supportedCaptionExtensions = new Set([".sbv"]);
+const supportedAudioExtensions = new Set([".mp3", ".m4a", ".wav", ".flac", ".ogg", ".aac", ".opus", ".wma"]);
 const youtubeIdPattern = /^[a-zA-Z0-9_-]{11}$/;
 
-function appRoot() {
+// ── Active transcription process ─────────────────────────────────────────────
+let activeTranscribeProcess: ChildProcess | null = null;
+
+// ── Path helpers ─────────────────────────────────────────────────────────────
+//
+// THREE distinct roots — mixing them up is what caused the blank-screen bug:
+//
+//  appRoot()       →  dist/ files (inside app.asar)  → app.getAppPath()
+//  resourcesRoot() →  engine/, scripts/ (extraResources, outside asar) → process.resourcesPath
+//  userDataRoot()  →  .venv, models (writable; Program Files is read-only) → app.getPath("userData")
+
+function appRoot(): string {
+  // Packed: app.getAppPath() = .../resources/app.asar  (Electron handles asar transparently)
+  // Dev:    process.cwd()   = project root
+  return app.isPackaged ? app.getAppPath() : process.cwd();
+}
+
+function resourcesRoot(): string {
+  // extraResources (engine/, scripts/) land beside app.asar in resources/
   return app.isPackaged ? process.resourcesPath : process.cwd();
 }
 
-function preloadPath() {
+function userDataRoot(): string {
+  // Always writable — %APPDATA%\Scribe Studio
+  // Used for .venv and whisper model cache
+  return app.getPath("userData");
+}
+
+function preloadPath(): string {
   return path.join(appRoot(), "dist", "preload", "preload.js");
+}
+
+function venvPythonPath(): string {
+  const root = userDataRoot();
+  return process.platform === "win32"
+    ? path.join(root, ".venv", "Scripts", "python.exe")
+    : path.join(root, ".venv", "bin", "python");
+}
+
+function transcribeScriptPath(): string {
+  return path.join(resourcesRoot(), "engine", "transcribe.py");
+}
+
+function setupScriptPath(): string {
+  return path.join(resourcesRoot(), "scripts", "setup-engine.ps1");
+}
+
+function isEngineReady(): boolean {
+  return fs.existsSync(venvPythonPath()) && fs.existsSync(transcribeScriptPath());
 }
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1120,
-    height: 760,
-    minWidth: 900,
-    minHeight: 620,
+    width: 1200,
+    height: 800,
+    minWidth: 960,
+    minHeight: 660,
     backgroundColor: "#0b0e14",
-    title: "SBV to VTT Converter",
+    title: "Scribe Studio",
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -40,33 +93,77 @@ function createWindow() {
     }
   });
 
-  // Security: set Content-Security-Policy
-  mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
-    callback({
-      responseHeaders: {
-        ...details.responseHeaders,
-        "Content-Security-Policy": [
-          "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://www.youtube.com https://*.youtube.com; img-src 'self' data:"
-        ]
-      }
+  // Security: set Content-Security-Policy (production only — CSP blocks Vite HMR in dev)
+  if (app.isPackaged) {
+    mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+      callback({
+        responseHeaders: {
+          ...details.responseHeaders,
+          "Content-Security-Policy": [
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://www.youtube.com https://*.youtube.com; img-src 'self' data:"
+          ]
+        }
+      });
     });
-  });
+  }
 
   if (app.isPackaged) {
-    mainWindow.loadFile(path.join(appRoot(), "dist", "renderer", "index.html"));
+    mainWindow.loadURL("app://./index.html");
   } else {
     mainWindow.loadURL("http://127.0.0.1:5173");
     if (process.env.OPEN_DEVTOOLS === "1") {
       mainWindow.webContents.openDevTools({ mode: "detach" });
     }
   }
+
+  // ── Auto-update (production only) ───────────────────────────────────────────
+  if (app.isPackaged) {
+    autoUpdater.autoDownload = true;
+    autoUpdater.autoInstallOnAppQuit = true;
+
+    autoUpdater.on("update-available", (info) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("update:available", info.version);
+      }
+    });
+
+    autoUpdater.on("update-downloaded", () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("update:downloaded");
+      }
+    });
+
+    autoUpdater.on("error", (err) => {
+      // Silent — update errors should not crash the app
+      console.error("[auto-updater]", err.message);
+    });
+
+    // Check immediately, then every 4 hours
+    void autoUpdater.checkForUpdates();
+    setInterval(() => { void autoUpdater.checkForUpdates(); }, 4 * 60 * 60 * 1000);
+  }
 }
+
+// ── Caption file helpers ──────────────────────────────────────────────────────
 
 function isSbvFile(filePath: string) {
   return supportedCaptionExtensions.has(path.extname(filePath).toLowerCase());
 }
 
+function isAudioFile(filePath: string) {
+  return supportedAudioExtensions.has(path.extname(filePath).toLowerCase());
+}
+
 function fileToCaptionFile(filePath: string): CaptionFile {
+  const stat = fs.statSync(filePath);
+  return {
+    path: filePath,
+    name: path.basename(filePath),
+    size: stat.size
+  };
+}
+
+function fileToAudioFile(filePath: string): AudioFile {
   const stat = fs.statSync(filePath);
   return {
     path: filePath,
@@ -102,6 +199,33 @@ function collectSbvFromDir(dirPath: string, maxDepth: number = 5): string[] {
   return results;
 }
 
+/** Recursively collect audio files from a directory. */
+function collectAudioFromDir(dirPath: string, maxDepth: number = 5): string[] {
+  if (maxDepth <= 0) {
+    return [];
+  }
+
+  const results: string[] = [];
+
+  try {
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const fullPath = path.join(dirPath, entry.name);
+
+      if (entry.isFile() && isAudioFile(entry.name)) {
+        results.push(fullPath);
+      } else if (entry.isDirectory() && !entry.name.startsWith(".")) {
+        results.push(...collectAudioFromDir(fullPath, maxDepth - 1));
+      }
+    }
+  } catch {
+    // Skip directories we can't read
+  }
+
+  return results;
+}
+
 function resolveCaptionFiles(filePaths: string[]) {
   const seen = new Set<string>();
   const files: CaptionFile[] = [];
@@ -117,7 +241,6 @@ function resolveCaptionFiles(filePaths: string[]) {
 
     const stat = fs.statSync(filePath);
 
-    // Support dropping directories — recursively find .sbv files inside
     if (stat.isDirectory()) {
       const dirFiles = collectSbvFromDir(filePath);
       dirFiles.forEach((dirFile) => {
@@ -135,6 +258,43 @@ function resolveCaptionFiles(filePaths: string[]) {
 
     seen.add(filePath);
     files.push(fileToCaptionFile(filePath));
+  });
+
+  return files;
+}
+
+function resolveAudioFiles(filePaths: string[]) {
+  const seen = new Set<string>();
+  const files: AudioFile[] = [];
+
+  filePaths.forEach((filePath) => {
+    if (!filePath || seen.has(filePath)) {
+      return;
+    }
+
+    if (!fs.existsSync(filePath)) {
+      return;
+    }
+
+    const stat = fs.statSync(filePath);
+
+    if (stat.isDirectory()) {
+      const dirFiles = collectAudioFromDir(filePath);
+      dirFiles.forEach((dirFile) => {
+        if (!seen.has(dirFile)) {
+          seen.add(dirFile);
+          files.push(fileToAudioFile(dirFile));
+        }
+      });
+      return;
+    }
+
+    if (!stat.isFile() || !isAudioFile(filePath)) {
+      return;
+    }
+
+    seen.add(filePath);
+    files.push(fileToAudioFile(filePath));
   });
 
   return files;
@@ -197,6 +357,8 @@ function convertFile(filePath: string, outputPath: string): Omit<ConversionResul
     message: `Converted ${converted.cueCount} cues.`
   };
 }
+
+// ── YouTube helpers ───────────────────────────────────────────────────────────
 
 function parseYouTubeVideoId(videoInput: string) {
   const trimmed = videoInput.trim();
@@ -446,6 +608,215 @@ async function convertYouTubeCaption(request: YouTubeCaptionConversionRequest): 
   }
 }
 
+// ── Transcription helpers ─────────────────────────────────────────────────────
+
+function sendTranscribeEvent(event: TranscribeEvent) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("transcribe:event", event);
+  }
+}
+
+function killActiveProcess() {
+  if (activeTranscribeProcess) {
+    transcribeCancelled = true;
+    try {
+      activeTranscribeProcess.kill("SIGTERM");
+    } catch {
+      // already dead
+    }
+    activeTranscribeProcess = null;
+  }
+}
+
+// Explicit cancellation flag so the batch stops cleanly after the current file
+let transcribeCancelled = false;
+
+async function runTranscription(request: TranscribeRequest): Promise<void> {
+  killActiveProcess();
+  transcribeCancelled = false;
+
+  const pythonExe = venvPythonPath();
+  const scriptPath = transcribeScriptPath();
+
+  if (!fs.existsSync(pythonExe)) {
+    sendTranscribeEvent({
+      type: "error",
+      message: `Python engine not found. Run the setup script first.\nExpected: ${pythonExe}`
+    });
+    return;
+  }
+
+  if (!fs.existsSync(scriptPath)) {
+    sendTranscribeEvent({
+      type: "error",
+      message: `Transcription script not found: ${scriptPath}`
+    });
+    return;
+  }
+
+  // Build jobs list — outputPaths is a parallel array supplied by the renderer
+  const jobs = request.filePaths
+    .map((filePath, i) => ({
+      input: filePath,
+      output: request.outputPaths[i] ?? ""
+    }))
+    .filter((job) => {
+      if (!fs.existsSync(job.input)) {
+        sendTranscribeEvent({ type: "error", message: `Audio file not found: ${job.input}` });
+        return false;
+      }
+      if (!job.output) {
+        sendTranscribeEvent({ type: "error", message: `No output path for: ${job.input}` });
+        return false;
+      }
+      fs.mkdirSync(path.dirname(job.output), { recursive: true });
+      return true;
+    });
+
+  if (jobs.length === 0) return;
+
+  // Write a temp jobs file so all files are processed in ONE Python session (one model load)
+  const jobsFile = path.join(app.getPath("temp"), `vtt-jobs-${Date.now()}.json`);
+  fs.writeFileSync(jobsFile, JSON.stringify(jobs), "utf8");
+
+  const modelsDir = path.join(userDataRoot(), "models");
+  fs.mkdirSync(modelsDir, { recursive: true });
+
+  const args = [
+    scriptPath,
+    "--jobs-file", jobsFile,
+    "--model", request.model,
+    "--model-dir", modelsDir,
+    "--device", "auto",
+    "--compute-type", "auto",
+    // Scale batch size to available VRAM: 32 for 16+ GB, 16 for 8-16 GB, 8 for 4-8 GB, 4 for <4 GB
+    "--batch-size", String(
+      !lastKnownVramGb || lastKnownVramGb < 4  ? 4  :
+      lastKnownVramGb  < 8                     ? 8  :
+      lastKnownVramGb  < 16                    ? 16 : 32
+    ),
+    "--max-cue-chars", String(request.maxCueChars),
+    "--max-cue-duration", String(request.maxCueDuration),
+  ];
+
+  if (request.wordTimestamps) {
+    args.push("--word-timestamps");
+  } else {
+    args.push("--no-word-timestamps");
+  }
+
+  if (request.language?.trim()) args.push("--language", request.language.trim());
+  if (request.initialPrompt?.trim()) args.push("--initial-prompt", request.initialPrompt.trim());
+
+  try {
+    await new Promise<void>((resolve) => {
+      const proc = spawn(pythonExe, args, {
+        env: { ...process.env, PYTHONUNBUFFERED: "1" },
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+
+      activeTranscribeProcess = proc;
+      let lineBuffer = "";
+
+      const handleLine = (line: string) => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        try {
+          const event = JSON.parse(trimmed) as TranscribeEvent;
+          sendTranscribeEvent(event);
+        } catch {
+          sendTranscribeEvent({ type: "log", message: trimmed });
+        }
+      };
+
+      proc.stdout?.on("data", (chunk: Buffer) => {
+        lineBuffer += chunk.toString("utf8");
+        const lines = lineBuffer.split("\n");
+        lineBuffer = lines.pop() ?? "";
+        lines.forEach(handleLine);
+      });
+
+      proc.stderr?.on("data", (chunk: Buffer) => {
+        const text = chunk.toString("utf8").trim();
+        // Filter out normal faster-whisper/PyTorch noise
+        if (text && !text.includes("UserWarning") && !text.includes("FutureWarning")) {
+          sendTranscribeEvent({ type: "log", message: `[stderr] ${text}` });
+        }
+      });
+
+      proc.on("close", (code) => {
+        if (lineBuffer.trim()) handleLine(lineBuffer);
+        activeTranscribeProcess = null;
+
+        if (code !== 0 && code !== 130 && !transcribeCancelled) {
+          sendTranscribeEvent({
+            type: "error",
+            message: `Engine exited unexpectedly (code ${code}). Check the log panel for details.`
+          });
+        }
+        resolve();
+      });
+    });
+  } finally {
+    // Always clean up the temp jobs file, even if spawn or the Promise threw
+    try { fs.unlinkSync(jobsFile); } catch { /* already gone */ }
+  }
+}
+
+async function getGpuInfo(): Promise<GpuInfo> {
+  const pythonExe = venvPythonPath();
+
+  if (!fs.existsSync(pythonExe)) {
+    return { gpuName: null, vramGb: null, device: "cpu" };
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (info: GpuInfo) => {
+      if (settled) return;
+      settled = true;
+      lastKnownVramGb = info.vramGb;
+      resolve(info);
+    };
+
+    const script = [
+      "import json, sys",
+      "try:",
+      "    import torch",
+      "    if torch.cuda.is_available():",
+      "        name = torch.cuda.get_device_name(0)",
+      "        vram = torch.cuda.get_device_properties(0).total_mem / (1024**3)",
+      "        print(json.dumps({'gpuName': name, 'vramGb': round(vram, 1), 'device': 'cuda'}))",
+      "    else:",
+      "        print(json.dumps({'gpuName': None, 'vramGb': None, 'device': 'cpu'}))",
+      "except Exception as e:",
+      "    print(json.dumps({'gpuName': None, 'vramGb': None, 'device': 'cpu'}))"
+    ].join("\n");
+
+    const proc = spawn(pythonExe, ["-c", script], {
+      env: { ...process.env, PYTHONUNBUFFERED: "1" },
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+
+    let output = "";
+    proc.stdout?.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+    proc.on("close", () => {
+      try {
+        settle(JSON.parse(output.trim()) as GpuInfo);
+      } catch {
+        settle({ gpuName: null, vramGb: null, device: "cpu" });
+      }
+    });
+
+    setTimeout(() => {
+      try { proc.kill(); } catch { /* already dead */ }
+      settle({ gpuName: null, vramGb: null, device: "cpu" });
+    }, 15000);
+  });
+}
+
+// ── IPC Handlers — SBV / Caption files ───────────────────────────────────────
+
 ipcMain.handle("dialog:choose-sbv", async () => {
   const result = await dialog.showOpenDialog({
     title: "Choose SBV caption files or folders",
@@ -510,6 +881,8 @@ ipcMain.handle("conversion:convert-sbv", async (_, request: ConversionRequest): 
   });
 });
 
+// ── IPC Handlers — YouTube ────────────────────────────────────────────────────
+
 ipcMain.handle("youtube:fetch-captions", async (_, videoInput: string) => fetchYouTubeCaptionTracks(videoInput));
 
 ipcMain.handle(
@@ -518,10 +891,43 @@ ipcMain.handle(
     convertYouTubeCaption(request)
 );
 
+// ── IPC Handlers — Audio / Transcription ─────────────────────────────────────
+
+ipcMain.handle("dialog:choose-audio", async () => {
+  const result = await dialog.showOpenDialog({
+    title: "Choose audio files or folders",
+    properties: ["openFile", "openDirectory", "multiSelections"],
+    filters: [
+      { name: "Audio Files", extensions: ["mp3", "m4a", "wav", "flac", "ogg", "aac", "opus", "wma"] },
+      { name: "All Files", extensions: ["*"] }
+    ]
+  });
+
+  return result.canceled ? [] : resolveAudioFiles(result.filePaths);
+});
+
+ipcMain.handle("files:resolve-audio", async (_, filePaths: string[]) => resolveAudioFiles(filePaths));
+
+ipcMain.handle("transcribe:start", async (_, request: TranscribeRequest) => {
+  // Fire and forget — progress comes via "transcribe:event" push events
+  void runTranscription(request);
+});
+
+ipcMain.handle("transcribe:cancel", async () => {
+  killActiveProcess();
+  sendTranscribeEvent({ type: "cancelled", message: "Transcription cancelled." });
+});
+
+ipcMain.handle("transcribe:get-gpu-info", async (): Promise<GpuInfo> => getGpuInfo());
+
+// ── IPC Handlers — Utilities ──────────────────────────────────────────────────
+
 ipcMain.handle("shell:reveal-path", async (_, targetPath: string) => {
-  if (targetPath) {
-    shell.showItemInFolder(targetPath);
-  }
+  if (targetPath) shell.showItemInFolder(targetPath);
+});
+
+ipcMain.handle("shell:open-folder", async (_, folderPath: string) => {
+  if (folderPath) await shell.openPath(folderPath);
 });
 
 /** Read a VTT file's content for preview in the renderer. */
@@ -544,9 +950,97 @@ ipcMain.handle("files:read-vtt", async (_, filePath: string): Promise<string | n
   }
 });
 
-app.whenReady().then(createWindow);
+// ── Engine setup IPC ──────────────────────────────────────────────────────────
+
+ipcMain.handle("engine:check", () => ({
+  ready: isEngineReady(),
+  pythonPath: venvPythonPath(),
+  scriptPath: transcribeScriptPath(),
+}));
+
+ipcMain.handle("engine:setup", async () => {
+  const ps1 = setupScriptPath();
+  if (!fs.existsSync(ps1)) {
+    return { success: false, error: `Setup script not found: ${ps1}` };
+  }
+
+  return new Promise<{ success: boolean; error?: string }>((resolve) => {
+    // Run setup-engine.ps1, passing installDir so the venv lands beside the exe
+    const proc = spawn("powershell.exe", [
+      "-NoProfile", "-ExecutionPolicy", "Bypass",
+      "-File", ps1
+    ], {
+      cwd: userDataRoot(),   // .venv is created in userData (always writable)
+      env: { ...process.env, PYTHONUNBUFFERED: "1" },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    const send = (line: string) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("engine:setup-log", line);
+      }
+    };
+
+    let buf = "";
+    const flush = (chunk: Buffer) => {
+      buf += chunk.toString("utf8");
+      const lines = buf.split(/\r?\n/);
+      buf = lines.pop() ?? "";
+      lines.forEach((l) => l.trim() && send(l));
+    };
+
+    proc.stdout?.on("data", flush);
+    proc.stderr?.on("data", flush);
+
+    proc.on("close", (code) => {
+      if (buf.trim()) send(buf);
+      if (code === 0) {
+        send("✅ Engine setup complete!");
+        resolve({ success: true });
+      } else {
+        send(`❌ Setup failed (exit code ${code})`);
+        resolve({ success: false, error: `Exit code ${code}` });
+      }
+    });
+  });
+});
+
+// ── IPC Handlers — Updates ────────────────────────────────────────────────────
+
+ipcMain.handle("update:install", () => autoUpdater.quitAndInstall());
+
+// Register app:// scheme BEFORE app is ready (Electron requirement)
+// This lets the packaged renderer load its assets via a stable custom protocol
+// instead of file://, which doesn't resolve asar sub-resources reliably.
+protocol.registerSchemesAsPrivileged([
+  { scheme: "app", privileges: { secure: true, standard: true, supportFetchAPI: true, corsEnabled: true } }
+]);
+
+// ── App lifecycle ─────────────────────────────────────────────────────────────
+
+app.whenReady().then(() => {
+  if (app.isPackaged) {
+    // Serve all renderer assets from inside the asar via app://
+    // URL pattern: app://./index.html  →  app.asar/dist/renderer/index.html
+    //              app://./assets/x.js →  app.asar/dist/renderer/assets/x.js
+    protocol.handle("app", (request) => {
+      const { pathname } = new URL(request.url);
+      const rel = pathname.replace(/^\//, ""); // strip leading /
+      const rendererBase = path.resolve(path.join(appRoot(), "dist", "renderer"));
+      const filePath = path.resolve(path.join(rendererBase, rel));
+      // Guard against path traversal (app://./../../../sensitive-file)
+      if (!filePath.startsWith(rendererBase + path.sep) && filePath !== rendererBase) {
+        return new Response("Forbidden", { status: 403 });
+      }
+      return net.fetch(`file://${filePath}`);
+    });
+  }
+
+  createWindow();
+});
 
 app.on("window-all-closed", () => {
+  killActiveProcess();
   if (process.platform !== "darwin") {
     app.quit();
   }

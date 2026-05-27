@@ -1,5 +1,7 @@
 faster-whisper>=1.1.0
 mutagen>=1.47.0
-torch>=2.0.0
-nvidia-cublas-cu12>=12.4.0;platform_system=="Windows" or platform_system=="Linux"
+# torch cu128 = CUDA 12.8 — required for Blackwell (RTX 5090, SM 10.0)
+# Also works on Ampere (RTX 30xx, SM 86), Ada (RTX 40xx, SM 89)
+torch>=2.6.0
+nvidia-cublas-cu12>=12.8.0;platform_system=="Windows" or platform_system=="Linux"
 nvidia-cudnn-cu12>=9.1.0;platform_system=="Windows" or platform_system=="Linux"

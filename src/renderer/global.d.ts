@@ -1,4 +1,4 @@
-import type { SbvConverterApi } from "../preload/preload";
+import type { SbvConverterApi } from "../shared/types";
 
 declare global {
   interface Window {

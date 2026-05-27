@@ -26,8 +26,7 @@ def emit(event_type: str, **payload: object) -> None:
 
 
 def compact_text(text: str) -> str:
-    compact = re.sub(r"\s+", " ", text.replace("-->", "->")).strip()
-    return compact
+    return re.sub(r"\s+", " ", text.replace("-->", "->")).strip()
 
 
 def clean_text(text: str) -> str:
@@ -63,7 +62,6 @@ def audio_duration(audio_path: Path) -> Optional[float]:
             return float(media.info.length)
     except Exception:
         return None
-
     return None
 
 
@@ -77,15 +75,19 @@ def detect_device(requested: str) -> str:
                 gpu_name = torch.cuda.get_device_name(0)
                 vram_gb = torch.cuda.get_device_properties(0).total_mem / (1024**3)
                 emit("log", message=f"CUDA GPU detected: {gpu_name} ({vram_gb:.1f} GB VRAM)")
+                emit("gpu_info", gpuName=gpu_name, vramGb=round(vram_gb, 1), device="cuda")
                 return "cuda"
             else:
                 emit("log", message="No CUDA GPU detected, falling back to CPU")
+                emit("gpu_info", gpuName=None, vramGb=None, device="cpu")
                 return "cpu"
         except ImportError:
             emit("log", message="PyTorch not available for GPU detection, falling back to CPU")
+            emit("gpu_info", gpuName=None, vramGb=None, device="cpu")
             return "cpu"
         except Exception as exc:
             emit("log", message=f"GPU detection failed ({exc}), falling back to CPU")
+            emit("gpu_info", gpuName=None, vramGb=None, device="cpu")
             return "cpu"
 
     return requested
@@ -95,7 +97,6 @@ def resolve_compute_type(compute_type: str, device: str) -> str:
     """Pick the best compute type for the resolved device."""
     if compute_type != "auto":
         return compute_type
-
     # float16 is optimal for modern NVIDIA GPUs (RTX 30xx/40xx/50xx)
     # int8 is best for CPU inference
     return "float16" if device == "cuda" else "int8"
@@ -172,7 +173,7 @@ def segment_to_cues(segment: object, max_chars: int, max_duration: float, min_du
 def write_vtt_header(handle, source: Path, model: str) -> None:
     generated = time.strftime("%Y-%m-%d %H:%M:%S")
     handle.write("WEBVTT\n\n")
-    handle.write(f"NOTE Generated locally by Audiobook VTT Studio at {generated}\n")
+    handle.write(f"NOTE Generated locally by Scribe Studio at {generated}\n")
     handle.write(f"NOTE Source: {source.name}\n")
     handle.write(f"NOTE Model: {model}\n\n")
 
@@ -182,107 +183,35 @@ def write_cue(handle, cue: Cue) -> None:
     handle.write(f"{cue.text}\n\n")
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Transcribe an audiobook locally and export WebVTT.")
-    parser.add_argument("audio", help="Path to the source audio file.")
-    parser.add_argument("--output", required=True, help="Path to the final .vtt file.")
-    parser.add_argument("--model", default="medium", help="Whisper model name or local model path.")
-    parser.add_argument("--model-dir", default=None, help="Directory used to cache downloaded models.")
-    parser.add_argument("--language", default=None, help="Optional language code such as en, es, fr.")
-    parser.add_argument(
-        "--device",
-        default="auto",
-        choices=["cpu", "cuda", "auto"],
-        help="Inference device. 'auto' detects CUDA GPU and falls back to CPU.",
-    )
-    parser.add_argument(
-        "--compute-type",
-        default="auto",
-        choices=["int8", "float16", "int8_float16", "float32", "auto", "default"],
-        help="CTranslate2 compute type. 'auto' picks float16 for CUDA, int8 for CPU.",
-    )
-    parser.add_argument("--cpu-threads", default=0, type=int, help="Number of CPU threads for CTranslate2. Use 0 for default.")
-    parser.add_argument("--task", default="transcribe", choices=["transcribe", "translate"], help="Whisper task.")
-    parser.add_argument("--beam-size", default=5, type=int, help="Decoding beam size.")
-    parser.add_argument("--batch-size", default=24, type=int, help="Batch size for faster batched transcription.")
-    parser.add_argument(
-        "--batched",
-        dest="batched",
-        action="store_true",
-        default=True,
-        help="Use faster batched transcription for long audio.",
-    )
-    parser.add_argument("--no-batched", dest="batched", action="store_false", help="Use standard sequential transcription.")
-    parser.add_argument("--vad", dest="vad", action="store_true", default=True, help="Enable voice activity filtering.")
-    parser.add_argument("--no-vad", dest="vad", action="store_false", help="Disable voice activity filtering.")
-    parser.add_argument(
-        "--word-timestamps",
-        dest="word_timestamps",
-        action="store_true",
-        default=False,
-        help="Enable word timestamps for cleaner read-along cues.",
-    )
-    parser.add_argument(
-        "--no-word-timestamps",
-        dest="word_timestamps",
-        action="store_false",
-        help="Use Whisper segment timestamps only.",
-    )
-    parser.add_argument("--max-cue-duration", type=float, default=9.0, help="Maximum target cue duration in seconds.")
-    parser.add_argument("--max-cue-chars", type=int, default=120, help="Maximum target cue length.")
-    parser.add_argument("--min-cue-duration", type=float, default=0.7, help="Minimum cue duration in seconds.")
-    parser.add_argument("--initial-prompt", default=None, help="Optional vocabulary or spelling hints.")
-    return parser.parse_args()
-
-
-def main() -> int:
-    args = parse_args()
-    audio_path = Path(args.audio).expanduser().resolve()
-    output_path = Path(args.output).expanduser().resolve()
+def transcribe_one(
+    model,
+    pipeline,
+    audio_path: Path,
+    output_path: Path,
+    args,
+    file_index: int,
+    total_files: int,
+) -> int:
+    """Transcribe a single audio file using an already-loaded model. Returns cue count."""
     transcript_path = output_path.with_suffix(".txt")
     partial_vtt = output_path.with_suffix(".partial.vtt")
     partial_txt = transcript_path.with_suffix(".partial.txt")
 
-    if not audio_path.exists():
-        emit("error", message=f"Audio file not found: {audio_path}")
-        return 2
-
-    try:
-        from faster_whisper import BatchedInferencePipeline, WhisperModel
-    except Exception as exc:
-        emit("error", message=f"Missing Python engine packages. Run npm run setup. Details: {exc}")
-        return 2
-
-    # Resolve device and compute type with auto-detection
-    resolved_device = detect_device(args.device)
-    resolved_compute_type = resolve_compute_type(args.compute_type, resolved_device)
-
-    emit("log", message=f"Device: {resolved_device} | Compute type: {resolved_compute_type} | Model: {args.model}")
-
     duration = audio_duration(audio_path)
-    emit("ready", message="Loading local Whisper model", duration=duration)
+
+    emit(
+        "file_start",
+        filePath=str(audio_path),
+        outputPath=str(output_path),
+        index=file_index,
+        total=total_files,
+        duration=duration,
+    )
+
+    file_start_time = time.monotonic()
 
     try:
-        model = WhisperModel(
-            args.model,
-            device=resolved_device,
-            compute_type=resolved_compute_type,
-            cpu_threads=max(0, args.cpu_threads),
-            download_root=args.model_dir,
-        )
-    except Exception as exc:
-        emit("error", message=f"Could not load model '{args.model}': {exc}", details=traceback.format_exc())
-        return 3
-
-    emit("ready", message="Transcription started", duration=duration)
-    emit("log", message=f"Input: {audio_path}")
-    emit("log", message=f"Output VTT: {output_path}")
-    emit("log", message=f"Transcript TXT: {transcript_path}")
-
-    try:
-        if args.batched:
-            emit("log", message=f"Batched speed mode enabled with batch size {args.batch_size} and beam size {args.beam_size}")
-            pipeline = BatchedInferencePipeline(model=model)
+        if args.batched and pipeline is not None:
             segments, info = pipeline.transcribe(
                 str(audio_path),
                 language=args.language or None,
@@ -290,13 +219,13 @@ def main() -> int:
                 beam_size=args.beam_size,
                 vad_filter=args.vad,
                 word_timestamps=args.word_timestamps,
-                without_timestamps=not args.word_timestamps,
+                # Only pass without_timestamps when explicitly disabling word timestamps
+                **({"without_timestamps": True} if not args.word_timestamps else {}),
                 initial_prompt=args.initial_prompt or None,
                 batch_size=max(1, args.batch_size),
                 condition_on_previous_text=False,
             )
         else:
-            emit("log", message=f"Sequential quality mode enabled with beam size {args.beam_size}")
             segments, info = model.transcribe(
                 str(audio_path),
                 language=args.language or None,
@@ -308,11 +237,15 @@ def main() -> int:
             )
 
         detected_duration = duration or getattr(info, "duration", None)
+        detected_language = getattr(info, "language", None)
+        language_prob = getattr(info, "language_probability", None)
+
         emit(
             "metadata",
+            filePath=str(audio_path),
             duration=detected_duration,
-            language=getattr(info, "language", None),
-            languageProbability=getattr(info, "language_probability", None),
+            language=detected_language,
+            languageProbability=language_prob,
         )
 
         cue_count = 0
@@ -320,7 +253,6 @@ def main() -> int:
             "w", encoding="utf-8", newline="\n"
         ) as transcript:
             write_vtt_header(vtt, audio_path, args.model)
-            emit("log", message="VTT header written")
 
             for segment in segments:
                 segment_text = compact_text(getattr(segment, "text", ""))
@@ -348,6 +280,7 @@ def main() -> int:
 
                 emit(
                     "segment",
+                    filePath=str(audio_path),
                     text=segment_text,
                     currentTime=segment_end,
                     duration=detected_duration,
@@ -356,18 +289,191 @@ def main() -> int:
 
         os.replace(partial_vtt, output_path)
         os.replace(partial_txt, transcript_path)
+
+        elapsed = round(time.monotonic() - file_start_time, 1)
+
         emit(
             "complete",
+            filePath=str(audio_path),
             message=f"Created {cue_count} VTT cues.",
             outputPath=str(output_path),
             transcriptPath=str(transcript_path),
+            cueCount=cue_count,
             progress=1,
             duration=detected_duration,
+            language=detected_language,
+            languageProbability=language_prob,
+            elapsedSeconds=elapsed,
+            index=file_index,
+            total=total_files,
+        )
+
+        return cue_count
+
+    except KeyboardInterrupt:
+        raise
+    except Exception as exc:
+        emit(
+            "error",
+            filePath=str(audio_path),
+            message=str(exc),
+            details=traceback.format_exc(),
+            index=file_index,
+            total=total_files,
+        )
+        return 0
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Transcribe audiobook files locally and export WebVTT.")
+
+    # Single-file mode (backward compatible)
+    parser.add_argument("audio", nargs="?", default=None, help="Path to a single source audio file.")
+    parser.add_argument("--output", default=None, help="Path to the final .vtt file (single-file mode).")
+
+    # Batch mode
+    parser.add_argument(
+        "--jobs-file",
+        default=None,
+        help="Path to a JSON file containing [{input, output}, ...] pairs for batch processing.",
+    )
+
+    parser.add_argument("--model", default="large-v3", help="Whisper model name or local model path.")
+    parser.add_argument("--model-dir", default=None, help="Directory used to cache downloaded models.")
+    parser.add_argument("--language", default=None, help="Optional language code such as en, es, fr.")
+    parser.add_argument(
+        "--device",
+        default="auto",
+        choices=["cpu", "cuda", "auto"],
+        help="Inference device. 'auto' detects CUDA GPU and falls back to CPU.",
+    )
+    parser.add_argument(
+        "--compute-type",
+        default="auto",
+        choices=["int8", "float16", "int8_float16", "float32", "auto", "default"],
+        help="CTranslate2 compute type. 'auto' picks float16 for CUDA, int8 for CPU.",
+    )
+    parser.add_argument("--cpu-threads", default=0, type=int, help="Number of CPU threads for CTranslate2.")
+    parser.add_argument("--task", default="transcribe", choices=["transcribe", "translate"], help="Whisper task.")
+    parser.add_argument("--beam-size", default=5, type=int, help="Decoding beam size.")
+    parser.add_argument("--batch-size", default=32, type=int, help="Batch size for batched transcription (RTX: 32–48).")
+    parser.add_argument(
+        "--batched",
+        dest="batched",
+        action="store_true",
+        default=True,
+        help="Use faster batched transcription for long audio.",
+    )
+    parser.add_argument("--no-batched", dest="batched", action="store_false", help="Use standard sequential transcription.")
+    parser.add_argument("--vad", dest="vad", action="store_true", default=True, help="Enable voice activity filtering.")
+    parser.add_argument("--no-vad", dest="vad", action="store_false", help="Disable voice activity filtering.")
+    parser.add_argument(
+        "--word-timestamps",
+        dest="word_timestamps",
+        action="store_true",
+        default=True,
+        help="Enable word timestamps for phrase-level cues (default: on).",
+    )
+    parser.add_argument(
+        "--no-word-timestamps",
+        dest="word_timestamps",
+        action="store_false",
+        help="Use Whisper segment timestamps only.",
+    )
+    parser.add_argument("--max-cue-duration", type=float, default=3.5,
+                        help="Maximum target cue duration in seconds (default 3.5 for phrase-level quotes).")
+    parser.add_argument("--max-cue-chars", type=int, default=42,
+                        help="Maximum target cue length in characters (default 42 ~6-7 words).")
+    parser.add_argument("--min-cue-duration", type=float, default=0.5,
+                        help="Minimum cue duration in seconds (default 0.5).")
+    parser.add_argument("--initial-prompt", default=None, help="Optional vocabulary or spelling hints.")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+
+    # Resolve jobs list
+    if args.jobs_file:
+        try:
+            with open(args.jobs_file, encoding="utf-8") as f:
+                jobs = json.load(f)
+        except Exception as exc:
+            emit("error", message=f"Could not read jobs file: {exc}")
+            return 2
+    elif args.audio and args.output:
+        jobs = [{"input": args.audio, "output": args.output}]
+    else:
+        emit("error", message="Provide either --jobs-file or both 'audio' and --output arguments.")
+        return 2
+
+    if not jobs:
+        emit("error", message="No jobs to process.")
+        return 2
+
+    # Validate all input paths before loading model
+    for job in jobs:
+        ap = Path(job["input"]).expanduser().resolve()
+        if not ap.exists():
+            emit("error", message=f"Audio file not found: {ap}")
+            return 2
+
+    try:
+        from faster_whisper import BatchedInferencePipeline, WhisperModel
+    except Exception as exc:
+        emit("error", message=f"Missing Python engine packages. Run the setup script. Details: {exc}")
+        return 2
+
+    resolved_device = detect_device(args.device)
+    resolved_compute_type = resolve_compute_type(args.compute_type, resolved_device)
+
+    emit(
+        "log",
+        message=f"Device: {resolved_device} | Compute: {resolved_compute_type} | Model: {args.model} | Jobs: {len(jobs)}",
+    )
+    emit("ready", message=f"Loading {args.model} model…", jobCount=len(jobs))
+
+    batch_start = time.monotonic()
+
+    try:
+        model = WhisperModel(
+            args.model,
+            device=resolved_device,
+            compute_type=resolved_compute_type,
+            cpu_threads=max(0, args.cpu_threads),
+            download_root=args.model_dir,
+        )
+    except Exception as exc:
+        emit("error", message=f"Could not load model '{args.model}': {exc}", details=traceback.format_exc())
+        return 3
+
+    pipeline = BatchedInferencePipeline(model=model) if args.batched else None
+    emit("log", message=f"Model loaded in {time.monotonic() - batch_start:.1f}s")
+
+    total_cues = 0
+    total_files = len(jobs)
+
+    try:
+        for index, job in enumerate(jobs):
+            audio_path = Path(job["input"]).expanduser().resolve()
+            output_path = Path(job["output"]).expanduser().resolve()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            cues = transcribe_one(model, pipeline, audio_path, output_path, args, index, total_files)
+            total_cues += cues
+
+        elapsed = round(time.monotonic() - batch_start, 1)
+        emit(
+            "all_complete",
+            message=f"Batch done. {total_files} file{'s' if total_files != 1 else ''}, {total_cues} total cues.",
+            totalFiles=total_files,
+            totalCues=total_cues,
+            elapsedSeconds=elapsed,
         )
         return 0
 
     except KeyboardInterrupt:
-        emit("cancelled", message="Cancelled.")
+        emit("cancelled", message="Cancelled by user.")
         return 130
     except Exception as exc:
         emit("error", message=str(exc), details=traceback.format_exc())
