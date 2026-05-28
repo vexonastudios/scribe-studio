@@ -142,6 +142,17 @@ $VenvPython = Join-Path $Venv "Scripts\python.exe"
 Invoke-Checked "Bootstrapping pip..."     { & $VenvPython -m ensurepip --upgrade --default-pip }
 Invoke-Checked "Upgrading pip..."         { & $VenvPython -m pip install --upgrade pip }
 
+# Install torch first with --index-url to FORCE the cu128 GPU build.
+# Using --extra-index-url (only) lets pip silently grab the CPU-only torch
+# from PyPI instead, which means torch.cuda.is_available() returns False
+# even on machines with a capable GPU like the RTX 5090.
+Write-Host "Installing PyTorch cu128 (GPU build for CUDA 12.8 / RTX 30xx-50xx)..."
+& $VenvPython -m pip install "torch>=2.6.0" `
+    --index-url https://download.pytorch.org/whl/cu128
+if ($LASTEXITCODE -ne 0) {
+    throw "PyTorch (cu128) installation failed with exit code $LASTEXITCODE"
+}
+
 Write-Host "Installing transcription engine (downloading ~3-4 GB -- please wait, this takes several minutes)..."
 & $VenvPython -m pip install -r $RequirementsFile `
     --extra-index-url https://download.pytorch.org/whl/cu128
