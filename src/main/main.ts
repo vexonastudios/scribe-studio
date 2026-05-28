@@ -26,8 +26,9 @@ let mainWindow: BrowserWindow | null = null;
 // %APPDATA%\Scribe Studio. Override here so both sides agree on the same path.
 app.setPath("userData", path.join(app.getPath("appData"), "Scribe Studio"));
 
-// Last known VRAM from GPU probe — used to pick optimal batch size
+// Last known GPU info from probe — used to pick optimal batch size and cpu threads
 let lastKnownVramGb: number | null = null;
+let lastKnownDevice: "cuda" | "cpu" = "cpu";
 
 const supportedCaptionExtensions = new Set([".sbv"]);
 const supportedAudioExtensions = new Set([".mp3", ".m4a", ".wav", ".flac", ".ogg", ".aac", ".opus", ".wma"]);
@@ -697,11 +698,15 @@ async function runTranscription(request: TranscribeRequest): Promise<void> {
     "--model-dir", modelsDir,
     "--device", "auto",
     "--compute-type", "auto",
-    // Scale batch size to available VRAM: 32 for 16+ GB, 16 for 8-16 GB, 8 for 4-8 GB, 4 for <4 GB
+    // Scale batch size by available resource:
+    //   GPU: 32 for 16+ GB VRAM, 16 for 8-16 GB, 8 for 4-8 GB, 4 for <4 GB
+    //   CPU: 16 — RAM is plentiful, CTranslate2 chunks audio efficiently on multi-core
     "--batch-size", String(
-      !lastKnownVramGb || lastKnownVramGb < 4  ? 4  :
-      lastKnownVramGb  < 8                     ? 8  :
-      lastKnownVramGb  < 16                    ? 16 : 32
+      lastKnownDevice === "cuda"
+        ? (!lastKnownVramGb || lastKnownVramGb < 4 ? 4 :
+           lastKnownVramGb < 8                     ? 8 :
+           lastKnownVramGb < 16                    ? 16 : 32)
+        : 16   // CPU mode — batch=16 makes good use of many-core CPUs with ample RAM
     ),
     "--max-cue-chars", String(request.maxCueChars),
     "--max-cue-duration", String(request.maxCueDuration),
@@ -821,7 +826,9 @@ async function getGpuInfo(): Promise<GpuInfo> {
     proc.stdout?.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
     proc.on("close", () => {
       try {
-        settle(JSON.parse(output.trim()) as GpuInfo);
+        const info = JSON.parse(output.trim()) as GpuInfo;
+        lastKnownDevice = info.device === "cuda" ? "cuda" : "cpu";
+        settle(info);
       } catch {
         settle({ gpuName: null, vramGb: null, device: "cpu" });
       }

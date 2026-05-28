@@ -446,7 +446,9 @@ def main() -> int:
             args.model,
             device=resolved_device,
             compute_type=resolved_compute_type,
-            cpu_threads=max(0, args.cpu_threads),
+            # Use all logical cores when running on CPU and no explicit thread count given.
+            # CTranslate2's auto-detect can be conservative; os.cpu_count() is more aggressive.
+            cpu_threads=max(0, args.cpu_threads) or (os.cpu_count() or 4 if resolved_device == "cpu" else 0),
             download_root=args.model_dir,
         )
     except Exception as exc:
