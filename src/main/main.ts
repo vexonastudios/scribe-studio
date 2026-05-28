@@ -847,10 +847,7 @@ ipcMain.handle("dialog:choose-sbv", async () => {
   const result = await dialog.showOpenDialog({
     title: "Choose SBV caption files or folders",
     properties: ["openFile", "openDirectory", "multiSelections"],
-    filters: [
-      { name: "SBV Captions", extensions: ["sbv"] },
-      { name: "All Files", extensions: ["*"] }
-    ]
+    // No filter — see dialog:choose-audio comment for why.
   });
 
   return result.canceled ? [] : resolveCaptionFiles(result.filePaths);
@@ -923,10 +920,9 @@ ipcMain.handle("dialog:choose-audio", async () => {
   const result = await dialog.showOpenDialog({
     title: "Choose audio files or folders",
     properties: ["openFile", "openDirectory", "multiSelections"],
-    filters: [
-      { name: "Audio Files", extensions: ["mp3", "m4a", "wav", "flac", "ogg", "aac", "opus", "wma"] },
-      { name: "All Files", extensions: ["*"] }
-    ]
+    // No filter — on Windows, combining openFile + openDirectory + filters
+    // causes the native picker to hide files entirely. Extension filtering
+    // is handled downstream in resolveAudioFiles() instead.
   });
 
   return result.canceled ? [] : resolveAudioFiles(result.filePaths);
@@ -1113,10 +1109,7 @@ ipcMain.handle("dialog:choose-vtt", async () => {
   const result = await dialog.showOpenDialog({
     title: "Choose VTT files to fix",
     properties: ["openFile", "openDirectory", "multiSelections"],
-    filters: [
-      { name: "WebVTT Captions", extensions: ["vtt"] },
-      { name: "All Files", extensions: ["*"] }
-    ]
+    // No filter — see dialog:choose-audio comment for why.
   });
   if (result.canceled) return [];
   const seen = new Set<string>();
