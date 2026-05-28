@@ -1048,6 +1048,169 @@ ipcMain.handle("update:check", async () => {
   }
 });
 
+// ── VTT Capitalization Fix ────────────────────────────────────────────────────
+// JS mirror of engine/transcribe.py fix_cue_text() — must stay in sync.
+
+const VTT_PROPER_NOUNS: Array<[RegExp, string | ((m: RegExpMatchArray) => string)]> = [
+  [/\bholy spirit\b/gi, "Holy Spirit"],
+  [/\bgod\b/gi,         "God"],
+  [/\blord\b/gi,        "Lord"],
+  [/\bjesus\b/gi,       "Jesus"],
+  [/\bchrist\b/gi,      "Christ"],
+  [/\bbible\b/gi,       "Bible"],
+  [/\bscriptures?\b/gi, (m) => m[0].toLowerCase().endsWith("s") ? "Scriptures" : "Scripture"],
+  [/\bsatan\b/gi,       "Satan"],
+];
+
+function fixCueText(text: string): string {
+  if (!text) return text;
+  // 1. Standalone i → I
+  text = text.replace(/(?<!\w)i(?!\w)/g, "I");
+  // 2. Capitalize after . ! ? followed by space + lowercase
+  text = text.replace(/([.!?][\u2019'")\]]*)\s+([a-z])/g, (_, p, c) => `${_[0]}${_.slice(1, -1)}${c.toUpperCase()}`);
+  // Simpler + correct version:
+  text = text.replace(/([.!?][\u2019'")\]]*\s+)([a-z])/g, (_, pre, ch) => pre + ch.toUpperCase());
+  // 3. Capitalize first character
+  if (text && text[0] === text[0].toLowerCase() && text[0] !== text[0].toUpperCase()) {
+    text = text[0].toUpperCase() + text.slice(1);
+  }
+  // 4. Proper nouns
+  for (const [pattern, replacement] of VTT_PROPER_NOUNS) {
+    if (typeof replacement === "string") {
+      text = text.replace(pattern, replacement);
+    } else {
+      text = text.replace(pattern, (m) => replacement([m]));
+    }
+  }
+  return text;
+}
+
+/** Parse a VTT string into cue blocks: { timestamp, text }[] */
+function parseVttCues(content: string): Array<{ timestamp: string; text: string }> {
+  const cues: Array<{ timestamp: string; text: string }> = [];
+  // Split on blank lines
+  const blocks = content.split(/\n\s*\n/);
+  for (const block of blocks) {
+    const lines = block.trim().split(/\r?\n/);
+    const tsLine = lines.find((l) => l.includes("-->"));
+    if (!tsLine) continue;
+    const textLines = lines.slice(lines.indexOf(tsLine) + 1).filter((l) => l.trim() && !l.trim().match(/^\d+$/));
+    if (textLines.length === 0) continue;
+    cues.push({ timestamp: tsLine.trim(), text: textLines.join(" ").trim() });
+  }
+  return cues;
+}
+
+/** Rebuild a complete fixed VTT string from parsed cues + original header. */
+function rebuildVtt(content: string, fixedCues: Array<{ timestamp: string; text: string }>): string {
+  // Preserve everything up to and including the first cue block header
+  const headerEnd = content.search(/\d{2}:\d{2}:\d{2}\.\d{3}\s*-->/);
+  const header = headerEnd >= 0 ? content.slice(0, headerEnd) : "WEBVTT\n\n";
+  return header + fixedCues.map((c) => `${c.timestamp}\n${c.text}`).join("\n\n") + "\n";
+}
+
+ipcMain.handle("dialog:choose-vtt", async () => {
+  const result = await dialog.showOpenDialog({
+    title: "Choose VTT files to fix",
+    properties: ["openFile", "openDirectory", "multiSelections"],
+    filters: [
+      { name: "WebVTT Captions", extensions: ["vtt"] },
+      { name: "All Files", extensions: ["*"] }
+    ]
+  });
+  if (result.canceled) return [];
+  const seen = new Set<string>();
+  const files: import("../shared/types").CaptionFile[] = [];
+  for (const p of result.filePaths) {
+    if (!fs.existsSync(p)) continue;
+    const stat = fs.statSync(p);
+    if (stat.isDirectory()) {
+      for (const entry of fs.readdirSync(p, { withFileTypes: true })) {
+        if (entry.isFile() && entry.name.toLowerCase().endsWith(".vtt")) {
+          const full = path.join(p, entry.name);
+          if (!seen.has(full)) { seen.add(full); files.push({ path: full, name: entry.name, size: fs.statSync(full).size }); }
+        }
+      }
+    } else if (p.toLowerCase().endsWith(".vtt") && !seen.has(p)) {
+      seen.add(p); files.push({ path: p, name: path.basename(p), size: stat.size });
+    }
+  }
+  return files;
+});
+
+ipcMain.handle("files:resolve-vtt", async (_, filePaths: string[]) => {
+  const seen = new Set<string>();
+  const files: import("../shared/types").CaptionFile[] = [];
+  for (const p of (filePaths as string[])) {
+    if (!p || seen.has(p) || !fs.existsSync(p)) continue;
+    const stat = fs.statSync(p);
+    if (stat.isDirectory()) {
+      for (const entry of fs.readdirSync(p, { withFileTypes: true })) {
+        if (entry.isFile() && entry.name.toLowerCase().endsWith(".vtt")) {
+          const full = path.join(p, entry.name);
+          if (!seen.has(full)) { seen.add(full); files.push({ path: full, name: entry.name, size: fs.statSync(full).size }); }
+        }
+      }
+    } else if (p.toLowerCase().endsWith(".vtt") && !seen.has(p)) {
+      seen.add(p); files.push({ path: p, name: path.basename(p), size: stat.size });
+    }
+  }
+  return files;
+});
+
+ipcMain.handle("vtt:fix-files", async (_, filePaths: string[]) => {
+  const results: import("../shared/types").VttFixResult[] = [];
+  for (const filePath of (filePaths as string[])) {
+    if (!fs.existsSync(filePath)) continue;
+    try {
+      const content = fs.readFileSync(filePath, "utf8");
+      const cues = parseVttCues(content);
+      const diffs: import("../shared/types").VttCueDiff[] = cues.map((cue) => {
+        const fixed = fixCueText(cue.text);
+        return { timestamp: cue.timestamp, original: cue.text, fixed, changed: fixed !== cue.text };
+      });
+      results.push({
+        sourcePath: filePath,
+        sourceName: path.basename(filePath),
+        diffs,
+        changedCount: diffs.filter((d) => d.changed).length,
+      });
+    } catch (err) {
+      results.push({ sourcePath: filePath, sourceName: path.basename(filePath), diffs: [], changedCount: 0 });
+    }
+  }
+  return results;
+});
+
+ipcMain.handle("vtt:save-fixed", async (_, request: import("../shared/types").VttSaveRequest) => {
+  try {
+    let outputPath: string;
+    if (request.overwrite) {
+      outputPath = request.sourcePath;
+    } else {
+      const dir = request.outputDir?.trim() || path.dirname(request.sourcePath);
+      const base = path.basename(request.sourcePath, ".vtt");
+      outputPath = path.join(dir, `${base}-fixed.vtt`);
+      // Avoid clobbering an existing -fixed.vtt
+      let counter = 2;
+      while (fs.existsSync(outputPath)) {
+        outputPath = path.join(dir, `${base}-fixed (${counter}).vtt`);
+        counter++;
+      }
+    }
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    fs.writeFileSync(outputPath, request.fixed, "utf8");
+    return { sourcePath: request.sourcePath, outputPath, status: "saved" } satisfies import("../shared/types").VttSaveResult;
+  } catch (err) {
+    return {
+      sourcePath: request.sourcePath,
+      outputPath: "",
+      status: "failed",
+      message: err instanceof Error ? err.message : String(err),
+    } satisfies import("../shared/types").VttSaveResult;
+  }
+});
+
 // ── Native application menu ───────────────────────────────────────────────────
 
 function buildMenu() {

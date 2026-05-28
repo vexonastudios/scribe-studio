@@ -39,6 +39,51 @@ def clean_text(text: str) -> str:
     return html.escape(compact_text(text), quote=False)
 
 
+# ── Capitalization post-processor ────────────────────────────────────────────
+# Whisper often outputs lowercase 'i', fails to capitalize after sentence
+# endings, and lowercases sacred proper nouns. Fix these before writing VTT.
+
+# Word/phrase substitutions — applied as whole-word replacements (case-insensitive)
+# ordered longest-first so "holy spirit" is matched before "spirit".
+_PROPER_NOUNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r'\bholy spirit\b', re.IGNORECASE), 'Holy Spirit'),
+    (re.compile(r'\bgod\b',         re.IGNORECASE), 'God'),
+    (re.compile(r'\blord\b',        re.IGNORECASE), 'Lord'),
+    (re.compile(r'\bjesus\b',       re.IGNORECASE), 'Jesus'),
+    (re.compile(r'\bchrist\b',      re.IGNORECASE), 'Christ'),
+    (re.compile(r'\bbible\b',       re.IGNORECASE), 'Bible'),
+    (re.compile(r'\bscriptures?\b', re.IGNORECASE), lambda m: 'Scriptures' if m.group().lower().endswith('s') else 'Scripture'),
+    (re.compile(r'\bsatan\b',       re.IGNORECASE), 'Satan'),
+]
+
+
+def fix_cue_text(text: str) -> str:
+    """Apply capitalization corrections to a single cue's text."""
+    if not text:
+        return text
+
+    # 1. Capitalize standalone 'i' → 'I'
+    text = re.sub(r'(?<![\w])i(?![\w])', 'I', text)
+
+    # 2. Capitalize first letter after sentence-ending punctuation (. ! ?)
+    #    followed by a space and a lowercase letter.
+    text = re.sub(
+        r'([.!?][\u2019\'"\)\]]*)(\s+)([a-z])',
+        lambda m: m.group(1) + m.group(2) + m.group(3).upper(),
+        text
+    )
+
+    # 3. Capitalize the very first character of the cue.
+    if text and text[0].islower():
+        text = text[0].upper() + text[1:]
+
+    # 4. Replace known proper nouns / sacred names.
+    for pattern, replacement in _PROPER_NOUNS:
+        text = pattern.sub(replacement, text)
+
+    return text
+
+
 def format_timestamp(seconds: float) -> str:
     safe_seconds = max(0.0, seconds)
     hours = int(safe_seconds // 3600)
@@ -186,7 +231,7 @@ def write_vtt_header(handle, source: Path, model: str) -> None:
 
 def write_cue(handle, cue: Cue) -> None:
     handle.write(f"{format_timestamp(cue.start)} --> {format_timestamp(cue.end)}\n")
-    handle.write(f"{cue.text}\n\n")
+    handle.write(f"{fix_cue_text(cue.text)}\n\n")
 
 
 def transcribe_one(

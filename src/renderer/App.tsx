@@ -29,6 +29,8 @@ import type {
   GpuInfo,
   SbvConverterApi,
   TranscribeEvent,
+  VttFixResult,
+  VttSaveRequest,
   YouTubeCaptionConversionResult,
   YouTubeCaptionTrack,
   YouTubeCaptionTracksResult
@@ -37,7 +39,7 @@ import type {
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type DropFile = File & { path?: string };
-type SourceMode = "transcribe" | "files" | "youtube";
+type SourceMode = "transcribe" | "files" | "youtube" | "fix";
 type QueueStatus = "ready" | "queued" | "processing" | "converted" | "failed";
 
 interface TranscribeQueueItem {
@@ -78,6 +80,10 @@ const converter: SbvConverterApi =
     installUpdate: async () => undefined,
     onUpdateAvailable: () => () => undefined,
     onUpdateDownloaded: () => () => undefined,
+    chooseVttFiles: async () => [],
+    resolveVttFiles: async () => [],
+    fixVttFiles: async () => [],
+    saveFixedVtt: async () => ({ sourcePath: "", outputPath: "", status: "failed" as const }),
   };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -388,6 +394,14 @@ function App() {
   const [youtubeError, setYoutubeError] = useState("");
   const [isFetchingCaptions, setIsFetchingCaptions] = useState(false);
   const [isSavingYoutube, setIsSavingYoutube] = useState(false);
+
+  // ── VTT Fix state ──────────────────────────────────────────────────────────
+  const [vttFixFiles, setVttFixFiles] = useState<CaptionFile[]>([]);
+  const [vttFixResults, setVttFixResults] = useState<VttFixResult[]>([]);
+  const [vttFixing, setVttFixing] = useState(false);
+  const [vttSaveMode, setVttSaveMode] = useState<"new" | "overwrite">("new");
+  const [vttSaveStatus, setVttSaveStatus] = useState<Record<string, "saving" | "saved" | "failed">>({});
+  const [isDraggingVtt, setIsDraggingVtt] = useState(false);
 
   // ── Derived ───────────────────────────────────────────────────────────────
   const resultByPath = useMemo(() => new Map(results.map((r) => [r.sourcePath, r])), [results]);
@@ -824,6 +838,14 @@ function App() {
               <Youtube size={15} />
               <span>YouTube</span>
             </button>
+            <button
+              id="tab-fix-vtt"
+              className={sourceMode === "fix" ? "selected" : ""}
+              onClick={() => setSourceMode("fix")}
+            >
+              <CheckCircle2 size={15} />
+              <span>Fix VTT</span>
+            </button>
           </div>
 
           {/* ── Transcribe panel ── */}
@@ -1078,6 +1100,85 @@ function App() {
               <ExternalLink size={18} />
               <span>Open folder</span>
             </button>
+          )}
+
+          {sourceMode === "fix" && (
+            <>
+              <div className="panel-heading">
+                <CheckCircle2 size={20} />
+                <h2>Fix VTT</h2>
+              </div>
+
+              <section
+                className={`drop-zone ${isDraggingVtt ? "active" : ""}`}
+                onDragEnter={(e) => { e.preventDefault(); setIsDraggingVtt(true); }}
+                onDragOver={(e) => e.preventDefault()}
+                onDragLeave={() => setIsDraggingVtt(false)}
+                onDrop={async (e) => {
+                  e.preventDefault(); setIsDraggingVtt(false);
+                  const paths = Array.from(e.dataTransfer.files).map((f) => (f as DropFile).path).filter(Boolean) as string[];
+                  if (!paths.length) return;
+                  const resolved = await converter.resolveVttFiles(paths);
+                  const next = [...vttFixFiles, ...resolved.filter((r) => !vttFixFiles.some((f) => f.path === r.path))];
+                  setVttFixFiles(next);
+                  setVttFixResults([]);
+                  setVttSaveStatus({});
+                }}
+                aria-label="Drop VTT files"
+              >
+                <FileText size={28} />
+                <strong>Drop .vtt files or folders</strong>
+                <span>{vttFixFiles.length ? `${vttFixFiles.length} file${vttFixFiles.length === 1 ? "" : "s"} loaded` : "No files added"}</span>
+              </section>
+
+              <div className="button-row">
+                <button id="btn-add-vtt" className="primary-action" onClick={async () => {
+                  const chosen = await converter.chooseVttFiles();
+                  const next = [...vttFixFiles, ...chosen.filter((r) => !vttFixFiles.some((f) => f.path === r.path))];
+                  setVttFixFiles(next);
+                  setVttFixResults([]);
+                  setVttSaveStatus({});
+                }} disabled={vttFixing}>
+                  <Upload size={18} /><span>Add VTT files</span>
+                </button>
+                <button className="icon-button" title="Clear" onClick={() => { setVttFixFiles([]); setVttFixResults([]); setVttSaveStatus({}); }} disabled={vttFixing}>
+                  <RotateCcw size={18} />
+                </button>
+              </div>
+
+              {vttFixFiles.length > 0 && (
+                <div className="file-list" aria-label="VTT files to fix">
+                  {vttFixFiles.map((f) => {
+                    const result = vttFixResults.find((r) => r.sourcePath === f.path);
+                    return (
+                      <article className="file-row" key={f.path}>
+                        <FileText size={18} />
+                        <div>
+                          <strong>{f.name}</strong>
+                          <span>{result ? `${result.changedCount} change${result.changedCount === 1 ? "" : "s"} found` : formatBytes(f.size)}</span>
+                        </div>
+                        {!result && !vttFixing && (
+                          <button className="icon-button" title="Remove" onClick={() => setVttFixFiles((prev) => prev.filter((x) => x.path !== f.path))}>
+                            <X size={16} />
+                          </button>
+                        )}
+                        {result && result.changedCount === 0 && <CheckCircle2 size={16} style={{ color: "var(--accent)" }} />}
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+
+              <label className="toggle" style={{ marginTop: 4 }}>
+                <input
+                  type="checkbox"
+                  checked={vttSaveMode === "overwrite"}
+                  onChange={(e) => setVttSaveMode(e.target.checked ? "overwrite" : "new")}
+                  disabled={vttFixing}
+                />
+                <span>Overwrite originals (default: save as -fixed.vtt)</span>
+              </label>
+            </>
           )}
 
           <div className="path-readout" title={outputDir || defaultOutputLabel}>
@@ -1345,7 +1446,127 @@ function App() {
             </>
           )}
 
-          {/* ── YouTube run panel ── */}
+          {/* ── Fix VTT run panel ── */}
+          {sourceMode === "fix" && (
+            <>
+              <div className="run-header">
+                <div>
+                  <p className="eyebrow">Capitalization Review</p>
+                  <h2>{vttFixResults.length ? `${vttFixResults.reduce((a, r) => a + r.changedCount, 0)} changes across ${vttFixResults.length} file${vttFixResults.length === 1 ? "" : "s"}` : "Fix VTT Files"}</h2>
+                </div>
+                <div className="run-actions">
+                  {vttFixFiles.length > 0 && vttFixResults.length === 0 && (
+                    <button
+                      id="btn-analyze-vtt"
+                      className="start-btn"
+                      disabled={vttFixing}
+                      onClick={async () => {
+                        setVttFixing(true);
+                        const results = await converter.fixVttFiles(vttFixFiles.map((f) => f.path));
+                        setVttFixResults(results);
+                        setVttFixing(false);
+                      }}
+                    >
+                      {vttFixing ? <Loader2 size={18} className="spin" /> : <Search size={18} />}
+                      <span>{vttFixing ? "Analyzing…" : "Analyze Files"}</span>
+                    </button>
+                  )}
+                  {vttFixResults.length > 0 && (
+                    <button
+                      id="btn-save-all-vtt"
+                      className="start-btn"
+                      disabled={Object.values(vttSaveStatus).some((s) => s === "saving")}
+                      onClick={async () => {
+                        for (const result of vttFixResults) {
+                          if (result.changedCount === 0) continue;
+                          setVttSaveStatus((prev) => ({ ...prev, [result.sourcePath]: "saving" }));
+                          const fixedContent = [
+                            "WEBVTT",
+                            "",
+                            ...result.diffs.map((d) => `${d.timestamp}\n${d.fixed}`)
+                          ].join("\n\n") + "\n";
+                          const req: VttSaveRequest = { sourcePath: result.sourcePath, fixed: fixedContent, overwrite: vttSaveMode === "overwrite" };
+                          const res = await converter.saveFixedVtt(req);
+                          setVttSaveStatus((prev) => ({ ...prev, [result.sourcePath]: res.status === "saved" ? "saved" : "failed" }));
+                        }
+                      }}
+                    >
+                      <CheckCircle2 size={18} />
+                      <span>Save All Fixed</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {vttFixResults.length === 0 && !vttFixing && (
+                <div className="empty-pane">
+                  <CheckCircle2 size={48} style={{ opacity: 0.2 }} />
+                  <p>Add .vtt files and click <strong>Analyze Files</strong> to review capitalization fixes before saving.</p>
+                </div>
+              )}
+
+              {vttFixing && (
+                <div className="empty-pane">
+                  <Loader2 size={36} className="spin" style={{ color: "var(--accent)" }} />
+                  <p>Analyzing files…</p>
+                </div>
+              )}
+
+              <div className="result-list">
+                {vttFixResults.map((result) => {
+                  const saveState = vttSaveStatus[result.sourcePath];
+                  const changedDiffs = result.diffs.filter((d) => d.changed);
+                  return (
+                    <article key={result.sourcePath} className="result-card">
+                      <header className="result-card-header">
+                        <div>
+                          <strong>{result.sourceName}</strong>
+                          <span style={{ marginLeft: 8, opacity: 0.6, fontSize: "0.82em" }}>
+                            {result.changedCount === 0 ? "No changes needed" : `${result.changedCount} cue${result.changedCount === 1 ? "" : "s"} fixed`}
+                          </span>
+                        </div>
+                        {result.changedCount > 0 && (
+                          <button
+                            className={`icon-btn-inline ${saveState === "saved" ? "saved" : ""}`}
+                            disabled={saveState === "saving" || saveState === "saved"}
+                            title={saveState === "saved" ? "Saved!" : "Save this file"}
+                            onClick={async () => {
+                              setVttSaveStatus((prev) => ({ ...prev, [result.sourcePath]: "saving" }));
+                              const fixedContent = [
+                                "WEBVTT",
+                                "",
+                                ...result.diffs.map((d) => `${d.timestamp}\n${d.fixed}`)
+                              ].join("\n\n") + "\n";
+                              const req: VttSaveRequest = { sourcePath: result.sourcePath, fixed: fixedContent, overwrite: vttSaveMode === "overwrite" };
+                              const res = await converter.saveFixedVtt(req);
+                              setVttSaveStatus((prev) => ({ ...prev, [result.sourcePath]: res.status === "saved" ? "saved" : "failed" }));
+                            }}
+                          >
+                            {saveState === "saving" ? <Loader2 size={14} className="spin" /> : saveState === "saved" ? <CheckCircle2 size={14} /> : <FolderOpen size={14} />}
+                            <span>{saveState === "saved" ? "Saved" : saveState === "saving" ? "Saving…" : "Save"}</span>
+                          </button>
+                        )}
+                      </header>
+
+                      {changedDiffs.length === 0 ? (
+                        <p style={{ padding: "8px 0", opacity: 0.5, fontSize: "0.85em" }}>✓ Already correctly capitalized</p>
+                      ) : (
+                        <div className="cue-diff-list">
+                          {changedDiffs.map((d) => (
+                            <div className="cue-diff" key={d.timestamp}>
+                              <span className="cue-ts">{d.timestamp}</span>
+                              <div className="cue-before">{d.original}</div>
+                              <div className="cue-after">{d.fixed}</div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </article>
+                  );
+                })}
+              </div>
+            </>
+          )}
           {sourceMode === "youtube" && (
             <>
               <div className="run-header">

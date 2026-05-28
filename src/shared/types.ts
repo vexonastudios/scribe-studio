@@ -54,6 +54,36 @@ export type YouTubeCaptionConversionResult = {
   message?: string;
 };
 
+// ── VTT Capitalization Fix ───────────────────────────────────────────────────
+
+export type VttCueDiff = {
+  timestamp: string;    // e.g. "00:00:01.000 --> 00:00:03.500"
+  original: string;
+  fixed: string;
+  changed: boolean;
+};
+
+export type VttFixResult = {
+  sourcePath: string;
+  sourceName: string;
+  diffs: VttCueDiff[];
+  changedCount: number;
+};
+
+export type VttSaveRequest = {
+  sourcePath: string;
+  fixed: string;           // full fixed VTT content
+  overwrite: boolean;      // true = overwrite source, false = save as -fixed.vtt
+  outputDir?: string;
+};
+
+export type VttSaveResult = {
+  sourcePath: string;
+  outputPath: string;
+  status: "saved" | "failed";
+  message?: string;
+};
+
 // ── MP3 Transcription ────────────────────────────────────────────────────────
 
 export type AudioFile = {
@@ -183,4 +213,9 @@ export type SbvConverterApi = {
   installUpdate: () => Promise<void>;
   onUpdateAvailable: (cb: (version: string) => void) => () => void;
   onUpdateDownloaded: (cb: () => void) => () => void;
+  // VTT fix
+  chooseVttFiles: () => Promise<CaptionFile[]>;
+  resolveVttFiles: (filePaths: string[]) => Promise<CaptionFile[]>;
+  fixVttFiles: (filePaths: string[]) => Promise<VttFixResult[]>;
+  saveFixedVtt: (request: VttSaveRequest) => Promise<VttSaveResult>;
 };

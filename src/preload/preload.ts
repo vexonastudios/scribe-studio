@@ -7,6 +7,9 @@ import type {
   GpuInfo,
   TranscribeEvent,
   TranscribeRequest,
+  VttFixResult,
+  VttSaveRequest,
+  VttSaveResult,
   YouTubeCaptionConversionRequest,
   YouTubeCaptionConversionResult,
   YouTubeCaptionTracksResult
@@ -57,7 +60,7 @@ const api = {
     ipcRenderer.on("engine:setup-log", handler);
     return () => ipcRenderer.removeListener("engine:setup-log", handler);
   },
-  // ── Updates ───────────────────────────────────────────────────────────────
+  // ── Updates ─────────────────────────────────────────────────────
   installUpdate: (): Promise<void> => ipcRenderer.invoke("update:install"),
   onUpdateAvailable: (cb: (version: string) => void): (() => void) => {
     const handler = (_: Electron.IpcRendererEvent, version: string) => cb(version);
@@ -68,7 +71,16 @@ const api = {
     const handler = () => cb();
     ipcRenderer.on("update:downloaded", handler);
     return () => ipcRenderer.removeListener("update:downloaded", handler);
-  }
+  },
+
+  // ── VTT capitalization fix ───────────────────────────────────────────
+  chooseVttFiles: (): Promise<CaptionFile[]> => ipcRenderer.invoke("dialog:choose-vtt"),
+  resolveVttFiles: (filePaths: string[]): Promise<CaptionFile[]> =>
+    ipcRenderer.invoke("files:resolve-vtt", filePaths),
+  fixVttFiles: (filePaths: string[]): Promise<VttFixResult[]> =>
+    ipcRenderer.invoke("vtt:fix-files", filePaths),
+  saveFixedVtt: (request: VttSaveRequest): Promise<VttSaveResult> =>
+    ipcRenderer.invoke("vtt:save-fixed", request),
 };
 
 contextBridge.exposeInMainWorld("sbvConverter", api);
