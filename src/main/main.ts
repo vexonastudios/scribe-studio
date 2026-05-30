@@ -718,6 +718,20 @@ async function runTranscription(request: TranscribeRequest): Promise<void> {
     args.push("--no-word-timestamps");
   }
 
+  // VAD: disabled by default for pure-speech audiobooks (British voices get clipped)
+  if (request.vad) {
+    args.push("--vad");
+  } else {
+    args.push("--no-vad");
+  }
+
+  // Sentence context: enabled by default so Whisper remembers prior words across segments
+  if (request.conditionOnPreviousText) {
+    args.push("--condition-on-previous-text");
+  } else {
+    args.push("--no-condition-on-previous-text");
+  }
+
   if (request.language?.trim()) args.push("--language", request.language.trim());
   if (request.initialPrompt?.trim()) args.push("--initial-prompt", request.initialPrompt.trim());
 

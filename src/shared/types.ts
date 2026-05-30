@@ -101,6 +101,8 @@ export type TranscribeRequest = {
   maxCueDuration: number;
   language?: string;
   initialPrompt?: string;
+  vad: boolean;                     // voice activity filter — disable for pure-speech audiobooks
+  conditionOnPreviousText: boolean; // give Whisper sentence context across segment boundaries
 };
 
 export type GpuInfo = {

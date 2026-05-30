@@ -274,7 +274,7 @@ def transcribe_one(
                 **({"without_timestamps": True} if not args.word_timestamps else {}),
                 initial_prompt=args.initial_prompt or None,
                 batch_size=max(1, args.batch_size),
-                condition_on_previous_text=False,
+                condition_on_previous_text=args.condition_on_previous_text,
             )
         else:
             segments, info = model.transcribe(
@@ -285,6 +285,7 @@ def transcribe_one(
                 vad_filter=args.vad,
                 word_timestamps=args.word_timestamps,
                 initial_prompt=args.initial_prompt or None,
+                condition_on_previous_text=args.condition_on_previous_text,
             )
 
         detected_duration = duration or getattr(info, "duration", None)
@@ -418,6 +419,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-batched", dest="batched", action="store_false", help="Use standard sequential transcription.")
     parser.add_argument("--vad", dest="vad", action="store_true", default=True, help="Enable voice activity filtering.")
     parser.add_argument("--no-vad", dest="vad", action="store_false", help="Disable voice activity filtering.")
+    parser.add_argument(
+        "--condition-on-previous-text",
+        dest="condition_on_previous_text",
+        action="store_true",
+        default=True,
+        help="Feed prior Whisper output as context for the next segment (improves accuracy for dense speech).",
+    )
+    parser.add_argument(
+        "--no-condition-on-previous-text",
+        dest="condition_on_previous_text",
+        action="store_false",
+        help="Disable previous-text conditioning (reduces repetition loops at the cost of context).",
+    )
     parser.add_argument(
         "--word-timestamps",
         dest="word_timestamps",

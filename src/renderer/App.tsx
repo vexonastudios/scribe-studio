@@ -373,6 +373,10 @@ function App() {
   const [wordTimestamps, setWordTimestamps] = useState(true);
   const [maxCueChars, setMaxCueChars] = useState(42);   // ~6-7 words — phrase-level for quote builder
   const [maxCueDuration, setMaxCueDuration] = useState(3.5); // phrase-level, not sentence-level
+  const [enableVad, setEnableVad] = useState(false);          // OFF by default — pure-speech audiobooks
+  const [conditionOnPrevText, setConditionOnPrevText] = useState(true); // ON — sentence context across segments
+  const [transcribeLang, setTranscribeLang] = useState("en"); // pin to English; avoids mis-detection of British accents
+  const [initialPrompt, setInitialPrompt] = useState("");     // optional vocabulary / spelling hints
   const [gpuInfo, setGpuInfo] = useState<GpuInfo | null>(null);
   const [isDraggingAudio, setIsDraggingAudio] = useState(false);
   const [logLines, setLogLines] = useState<string[]>([]);
@@ -605,6 +609,10 @@ function App() {
       wordTimestamps,
       maxCueChars,
       maxCueDuration,
+      vad: enableVad,
+      conditionOnPreviousText: conditionOnPrevText,
+      language: transcribeLang.trim() || undefined,
+      initialPrompt: initialPrompt.trim() || undefined,
     });
   };
 
@@ -971,6 +979,62 @@ function App() {
                   <><Cpu size={12} /><span>No GPU detected — using CPU</span></>
                 )}
               </div>
+
+              {/* ── Audio Quality Settings ── */}
+              <div className="panel-heading settings-heading" style={{ marginTop: 20 }}>
+                <Settings2 size={20} />
+                <h2>Audio Quality</h2>
+              </div>
+
+              <label className="field">
+                <span>Language</span>
+                <input
+                  id="transcribe-language"
+                  value={transcribeLang}
+                  onChange={(e) => setTranscribeLang(e.target.value)}
+                  placeholder="en"
+                  disabled={isTranscribing}
+                  title="ISO language code — 'en' prevents mis-detection of British accents as other languages"
+                />
+                <span className="field-hint">Use <code>en</code> for English audiobooks (including British narrators)</span>
+              </label>
+
+              <label className="toggle" style={{ marginTop: 14 }}>
+                <input
+                  id="toggle-vad"
+                  type="checkbox"
+                  checked={enableVad}
+                  onChange={(e) => setEnableVad(e.target.checked)}
+                  disabled={isTranscribing}
+                />
+                <span>Voice Activity Detection (VAD)</span>
+              </label>
+              <p className="field-hint" style={{ marginTop: 2 }}>Keep <strong>off</strong> for pure-speech audiobooks — VAD clips British accents and soft words</p>
+
+              <label className="toggle" style={{ marginTop: 10 }}>
+                <input
+                  id="toggle-condition-prev"
+                  type="checkbox"
+                  checked={conditionOnPrevText}
+                  onChange={(e) => setConditionOnPrevText(e.target.checked)}
+                  disabled={isTranscribing}
+                />
+                <span>Sentence context across segments</span>
+              </label>
+              <p className="field-hint" style={{ marginTop: 2 }}>Whisper remembers prior words — reduces dropped words at segment boundaries</p>
+
+              <label className="field" style={{ marginTop: 14 }}>
+                <span>Initial Prompt <span style={{ opacity: 0.5, fontWeight: 400 }}>(optional)</span></span>
+                <input
+                  id="transcribe-initial-prompt"
+                  value={initialPrompt}
+                  onChange={(e) => setInitialPrompt(e.target.value)}
+                  placeholder="e.g. Spurgeon, Calvary, sanctification"
+                  disabled={isTranscribing}
+                  title="Vocabulary hints help Whisper correctly spell theological terms and proper names"
+                />
+                <span className="field-hint">Spelling hints for names &amp; theological terms Whisper might mishear</span>
+              </label>
             </>
           )}
 
