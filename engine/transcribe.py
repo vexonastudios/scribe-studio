@@ -262,7 +262,10 @@ def transcribe_one(
     file_start_time = time.monotonic()
 
     try:
-        if args.batched and pipeline is not None:
+        # Batched inference requires VAD to split audio into chunks.
+        # Fall back to sequential mode when the user disables VAD.
+        use_batched = args.batched and pipeline is not None and args.vad
+        if use_batched:
             segments, info = pipeline.transcribe(
                 str(audio_path),
                 language=args.language or None,
