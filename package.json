@@ -1,6 +1,6 @@
 {
   "name": "scribe-studio",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Scribe Studio — local AI audiobook transcription and YouTube caption converter by Vexona Studios.",
   "author": "Vexona Studios",
   "main": "dist/main/main.js",

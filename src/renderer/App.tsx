@@ -374,7 +374,7 @@ function App() {
   const [maxCueChars, setMaxCueChars] = useState(42);   // ~6-7 words — phrase-level for quote builder
   const [maxCueDuration, setMaxCueDuration] = useState(3.5); // phrase-level, not sentence-level
   const [enableVad, setEnableVad] = useState(false);          // OFF by default — pure-speech audiobooks
-  const [conditionOnPrevText, setConditionOnPrevText] = useState(true); // ON — sentence context across segments
+  const [conditionOnPrevText, setConditionOnPrevText] = useState(false); // OFF — lets batch run in parallel; avoids repetition loops on long files
   const [transcribeLang, setTranscribeLang] = useState("en"); // pin to English; avoids mis-detection of British accents
   const [initialPrompt, setInitialPrompt] = useState("");     // optional vocabulary / spelling hints
   const [gpuInfo, setGpuInfo] = useState<GpuInfo | null>(null);

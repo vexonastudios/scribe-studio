@@ -1,12 +1,24 @@
 from __future__ import annotations
 
+import io
+import sys
+
+# Force UTF-8 on stdout/stderr regardless of the Windows console code page.
+# Without this, printing JSON that contains non-Latin characters (e.g. curly
+# quotes, Greek letters, etc.) raises a UnicodeEncodeError on cp1252 systems.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+else:
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 import argparse
 import html
 import json
 import math
 import os
 import re
-import sys
 import time
 import traceback
 from dataclasses import dataclass
@@ -56,9 +68,38 @@ _PROPER_NOUNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r'\bsatan\b',       re.IGNORECASE), 'Satan'),
 ]
 
+# ── Speech-quote detector ─────────────────────────────────────────────────────
+# Matches patterns like:  He said, This is the truth.
+#                         Paul wrote, I can do all things.
+#                         Jesus declared, I am the way.
+# and wraps the quoted portion in curly/straight double-quotes.
+# Only fires when the quote candidate starts with a capital and ends with
+# sentence-ending punctuation — avoids false positives on mid-sentence commas.
+_SPEECH_QUOTE_RE = re.compile(
+    r''
+    r'(\b(?:said|says|wrote|declared|replied|answered|asked|cried|exclaimed|'
+    r'proclaimed|commanded|stated|read(?:s|ing)?|quot(?:e[sd]?|ing)|speaks?|spoke)\b'
+    r'(?:[^,]{0,25}),\s+)'   # verb + optional filler + comma + space
+    r'([A-Z][^"\u201c\u201d]{3,}?[.!?])'  # quoted content: capital → sentence end
+    r'(?=[^a-z]|$)',          # not followed by a lowercase continuation
+    re.IGNORECASE,
+)
+
+
+def add_speech_quotes(text: str) -> str:
+    """Wrap text following speech-verb+comma patterns in double-quotation marks."""
+    # Skip if the cue already contains quotes.
+    if '"' in text or '\u201c' in text or '\u201d' in text:
+        return text
+
+    def _wrap(m: re.Match) -> str:
+        return f'{m.group(1)}\u201c{m.group(2).strip()}\u201d'
+
+    return _SPEECH_QUOTE_RE.sub(_wrap, text)
+
 
 def fix_cue_text(text: str) -> str:
-    """Apply capitalization corrections to a single cue's text."""
+    """Apply capitalization and quote corrections to a single cue's text."""
     if not text:
         return text
 
@@ -80,6 +121,9 @@ def fix_cue_text(text: str) -> str:
     # 4. Replace known proper nouns / sacred names.
     for pattern, replacement in _PROPER_NOUNS:
         text = pattern.sub(replacement, text)
+
+    # 5. Add quotation marks around speech after verbs like 'said,', 'wrote,' etc.
+    text = add_speech_quotes(text)
 
     return text
 
@@ -410,7 +454,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--cpu-threads", default=0, type=int, help="Number of CPU threads for CTranslate2.")
     parser.add_argument("--task", default="transcribe", choices=["transcribe", "translate"], help="Whisper task.")
-    parser.add_argument("--beam-size", default=5, type=int, help="Decoding beam size.")
+    parser.add_argument("--beam-size", default=3, type=int, help="Decoding beam size (3 = good balance of speed vs accuracy; 1 = fastest greedy; 5 = max accuracy).")
     parser.add_argument("--batch-size", default=32, type=int, help="Batch size for batched transcription (RTX: 32–48).")
     parser.add_argument(
         "--batched",
@@ -426,14 +470,14 @@ def parse_args() -> argparse.Namespace:
         "--condition-on-previous-text",
         dest="condition_on_previous_text",
         action="store_true",
-        default=True,
-        help="Feed prior Whisper output as context for the next segment (improves accuracy for dense speech).",
+        default=False,
+        help="Feed prior Whisper output as context for the next segment (improves accuracy but disables batch parallelism, making long files slower).",
     )
     parser.add_argument(
         "--no-condition-on-previous-text",
         dest="condition_on_previous_text",
         action="store_false",
-        help="Disable previous-text conditioning (reduces repetition loops at the cost of context).",
+        help="Disable previous-text conditioning (default — faster batched processing with no repetition loops).",
     )
     parser.add_argument(
         "--word-timestamps",
